@@ -1,87 +1,44 @@
 // app.js (ESM)
-const $ = (q) => document.querySelector(q);
-const htmlEl = $('#code-html');
-const cssEl  = $('#code-css');
-const jsEl   = $('#code-js');
-const iframe = $('#preview');
 
-// Tabs logic
-for (const btn of document.querySelectorAll('.tab')) {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.code').forEach(t => t.classList.remove('active'));
-    btn.classList.add('active');
-    const id = btn.getAttribute('data-tab');
-    document.querySelector('#code-' + id).classList.add('active');
-  });
-}
+const form = document.getElementById('builderForm');
+const htmlEl = document.getElementById('html');
+const cssEl = document.getElementById('css');
+const jsEl = document.getElementById('js');
+const status = document.getElementById('status');
+const copyLink = document.getElementById('copyLink');
+const openLink = document.getElementById('openLink');
 
-// Live Preview builder
-function buildHTMLDoc(title, html, css, js) {
-  return `<!DOCTYPE html><html lang="id"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>${title || 'Preview'}</title><style>${css || ''}</style></head><body>${html || ''}<script>${js || ''}<\/script></body></html>`;
-}
-
-$('#btnPreview').addEventListener('click', () => {
-  const doc = buildHTMLDoc($('#title').value, htmlEl.value, cssEl.value, jsEl.value);
-  const blob = new Blob([doc], { type: 'text/html' });
-  iframe.src = URL.createObjectURL(blob);
-});
-
-// Generate via Gemini (backend proxy)
-$('#btnGenerate').addEventListener('click', async () => {
-  const status = $('#genStatus');
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
   status.hidden = false;
-  status.textContent = 'Meminta AI...';
-
+  status.textContent = 'Menyimpan...';
   try {
-    const resp = await fetch('/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        prompt: $('#prompt').value,
-        variant: $('#variant').value
-      })
-    });
-    const data = await resp.json();
-    if (data.error) throw new Error(data.error);
-
-    $('#title').value = data.title || 'Situs Baru';
-    htmlEl.value = data.html || '';
-    cssEl.value  = data.css  || '';
-    jsEl.value   = data.js   || '';
-
-    status.textContent = 'Selesai. Silakan edit & preview.';
-    setTimeout(() => (status.hidden = true), 1500);
-  } catch (e) {
-    status.textContent = 'Gagal: ' + e.message;
-  }
-});
-
-// Publish (save to /u/<slug>/)
-$('#btnPublish').addEventListener('click', async () => {
-  const status = $('#saveStatus');
-  status.hidden = false; status.textContent = 'Menyimpan...';
-
-  try {
+    // ambil data
     const payload = {
-      slug: $('#slug').value,
-      title: $('#title').value,
+      slug: document.getElementById('slug').value,
+      title: document.getElementById('title').value,
       html: htmlEl.value,
       css: cssEl.value,
-      js: jsEl.value
+      js: jsEl.value,
     };
+
     const resp = await fetch('/api/sites', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      throw new Error('HTTP ' + resp.status + ': ' + errText);
+    }
+
     const data = await resp.json();
-    if (!data.ok) throw new Error(data.error || 'Unknown error');
+    if (!data.ok || !data.url) throw new Error(data.error || 'Unknown error');
 
     const liveURL = data.url;
-    const copyLink = $('#copyLink');
-    const openLink = $('#openLink');
-    copyLink.hidden = false; openLink.hidden = false;
+    copyLink.hidden = false; 
+    openLink.hidden = false;
     copyLink.href = '#';
     openLink.href = liveURL;
 
