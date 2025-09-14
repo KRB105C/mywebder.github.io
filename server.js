@@ -1,10 +1,11 @@
-// server.js
+// server.js (Supabase-ready)
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
+import { createClient } from '@supabase/supabase-js';
 
 dotenv.config();
 
@@ -12,15 +13,33 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
-const SITES_DIR = path.join(__dirname, 'sites');
+const SITES_DIR = path.join(__dirname, 'sites'); // hanya untuk lokal jika mau
 
-if (!process.env.GEMINI_API_KEY) {
-  console.warn('[WARN] GEMINI_API_KEY belum di-set di .env');
+// Supabase (pakai SERVICE ROLE key — server side)
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.warn('[WARN] SUPABASE_URL atau SUPABASE_SERVICE_ROLE_KEY belum di-set di .env / Vercel env');
 }
 
-app.use(express.json({ limit: '1mb' }));
+const supabase = createClient(
+  SUPABASE_URL || '',
+  SUPABASE_SERVICE_ROLE_KEY || '',
+  { auth: { persistSession: false } }
+);
+
+// Middleware
+app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
-app.use('/u', express.static(SITES_DIR)); // Serve situs user: /u/<slug>/index.html
+
+// Jika kamu mau pakai filesystem lokal untuk development, aktifkan USE_FS=1
+const useFs = process.env.USE_FS === '1';
+if (useFs) {
+  // Pastikan folder sites ada saat lokal
+  await fs.mkdir(SITES_DIR, { recursive: true });
+  app.use('/u', express.static(SITES_DIR));
+}
 
 // Util: sanitasi slug
 function toSlug(s) {
@@ -49,20 +68,27 @@ ${html}
 </html>`;
 }
 
-// 1) Route AI Generate (proxy ke Gemini)
+// Helper escape
+function escapeHTML(str = '') {
+  return str
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
+}
+
+// --- Route: proxy ke Gemini tetap seperti semula ---
 app.post('/api/generate', async (req, res) => {
   try {
     const { prompt, variant = 'landing-minimal' } = req.body || {};
     if (!prompt) return res.status(400).json({ error: 'Prompt kosong' });
 
-    // Prompt sistem untuk minta output HTML/CSS/JS yang bersih
     const systemInstruction = `Anda adalah asisten pembuat website statis.
 Keluarkan hanya JSON valid dengan bentuk:
 {
   "title": string,
-  "html": string,   // body content tanpa <html>, <head>, <body>
-  "css": string,    // CSS murni
-  "js": string      // JS murni tanpa module import eksternal
+  "html": string,
+  "css": string,
+  "js": string
 }
 Gaya: ${variant}. Hindari external CDN. Bahasa konten: Indonesia.`;
 
@@ -84,7 +110,6 @@ Gaya: ${variant}. Hindari external CDN. Bahasa konten: Indonesia.`;
     const data = await resp.json();
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
-    // Upaya parsing JSON dari model (hapus backticks/markdown jika ada)
     const cleaned = text
       .replace(/^```(json)?/i, '')
       .replace(/```$/i, '')
@@ -93,7 +118,6 @@ Gaya: ${variant}. Hindari external CDN. Bahasa konten: Indonesia.`;
     let parsed;
     try { parsed = JSON.parse(cleaned); }
     catch (e) {
-      // fallback minimal jika gagal parse
       parsed = {
         title: 'Hasil AI',
         html: `<main style="max-width:720px;margin:40px auto;font-family:system-ui">\n<h1>Hasil AI</h1>\n<pre>${escapeHTML(text).slice(0, 5000)}</pre>\n</main>`,
@@ -109,23 +133,39 @@ Gaya: ${variant}. Hindari external CDN. Bahasa konten: Indonesia.`;
   }
 });
 
-// 2) Route Save & Publish
+// --- Route: Save & Publish (Supabase) ---
 app.post('/api/sites', async (req, res) => {
   try {
     const { slug: rawSlug, title, html, css, js } = req.body || {};
     const slug = toSlug(rawSlug);
 
-    if (!html && !css && !js) return res.status(400).json({ error: 'Konten kosong' });
+    if (!html && !css && !js) {
+      return res.status(400).json({ error: 'Konten kosong' });
+    }
 
-    const dir = path.join(SITES_DIR, slug);
-    await fs.mkdir(dir, { recursive: true });
-    const finalHTML = buildHTML({ title, html, css, js });
-    await fs.writeFile(path.join(dir, 'index.html'), finalHTML, 'utf8');
+    // Upsert ke Supabase (pakai service role key so bypass RLS)
+    const payload = { slug, title, html, css, js };
+    const { data, error } = await supabase
+      .from('sites')
+      .upsert([ payload ], { onConflict: 'slug' });
+
+    if (error) {
+      console.error('Supabase upsert error:', error);
+      throw error;
+    }
+
+    // Optional: simpan juga ke filesystem lokal (hanya untuk dev)
+    if (useFs) {
+      const dir = path.join(SITES_DIR, slug);
+      await fs.mkdir(dir, { recursive: true });
+      const finalHTML = buildHTML({ title, html, css, js });
+      await fs.writeFile(path.join(dir, 'index.html'), finalHTML, 'utf8');
+    }
 
     return res.json({
       ok: true,
       slug,
-      url: `/u/${slug}/` // link aktif
+      url: `/u/${slug}/`
     });
   } catch (err) {
     console.error(err);
@@ -133,16 +173,40 @@ app.post('/api/sites', async (req, res) => {
   }
 });
 
-// Helper untuk escape (fallback block)
-function escapeHTML(str = '') {
-  return str
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;');
-}
+// --- Route: Serve site dari Supabase (no fs) ---
+app.get('/u/:slug', async (req, res) => {
+  try {
+    const { slug } = req.params;
 
-// Pastikan folder sites ada
-await fs.mkdir(SITES_DIR, { recursive: true });
+    // jika pakai fs lokal (dev) dan file ada, biarkan static middleware menangani /u/*
+    if (useFs) {
+      // fallback: let express static serve if exists
+      // but we try DB first for consistency
+    }
+
+    const { data, error } = await supabase
+      .from('sites')
+      .select('title, html, css, js')
+      .eq('slug', slug)
+      .single();
+
+    if (error || !data) {
+      return res.status(404).send('Website tidak ditemukan');
+    }
+
+    const finalHTML = buildHTML(data);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(finalHTML);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Server error');
+  }
+});
+
+// jika masih mau pastikan folder sites ada lokal
+if (useFs) {
+  await fs.mkdir(SITES_DIR, { recursive: true });
+}
 
 app.listen(PORT, () => {
   console.log(`AI Web Builder running on http://localhost:${PORT}`);
